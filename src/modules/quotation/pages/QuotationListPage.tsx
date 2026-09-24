@@ -1,0 +1,611 @@
+import { useState } from "react";
+import {
+  Pencil,
+  FileText,
+  MessageCircle,
+  Download,
+  Lock,
+  ArrowRightCircle,
+  Wand2,
+  Mail,
+  MoreHorizontal,
+  Trash2,
+} from "lucide-react";
+import { ResourceListPage } from "@/modules/common/ResourceListPage";
+import { Sheet } from "@/shared/components/Sheet";
+import { RecordCard, CardAction } from "@/shared/components/RecordCard";
+import { cn } from "@/lib/utils";
+import { QuotationDialog } from "../components/QuotationDialog";
+import { QuotationWizard } from "../components/QuotationWizard";
+import { SendMessageDialog } from "@/modules/messaging/components/SendMessageDialog";
+import type { MessageChannel } from "@/modules/messaging/types";
+import {
+  useQuotations,
+  useDeleteQuotation,
+  useSetQuotationStatus,
+  useIssueQuotation,
+  useConvertQuotation,
+} from "../hooks/useQuotations";
+import { quotationPdfPath } from "../api/quotationApi";
+import {
+  DOC_STATUS_LABELS,
+  DOC_STATUS_COLORS,
+  DOC_STATUSES,
+  DOC_TYPE_LABELS,
+  DOC_TYPE_PLURALS,
+  DOC_TYPES,
+} from "../constants/quotation.constants";
+import { openAuthenticatedPdf, downloadAuthenticatedPdf } from "@/shared/lib/openAuthenticatedPdf";
+import { useAppSelector } from "@/app/hooks";
+import { getApiErrorMessage } from "@/shared/api/http";
+import { toast } from "@/shared/lib/toast";
+import { formatCurrency, formatDate } from "@/lib/utils";
+import type { Quotation, QuotationListQuery, DocType, DocStatus } from "../types";
+
+const TABS: { key: DocType; label: string }[] = DOC_TYPES.map((key) => ({
+  key,
+  label: DOC_TYPE_PLURALS[key],
+}));
+
+/** One full-width row in the mobile document action sheet. */
+function DocSheetAction({
+  icon: Icon,
+  label,
+  onClick,
+  disabled,
+  tone = "neutral",
+}: {
+  icon: React.ComponentType<{ className?: string }>;
+  label: string;
+  onClick: () => void;
+  disabled?: boolean;
+  tone?: "neutral" | "primary" | "danger";
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      disabled={disabled}
+      className={cn(
+        "pg-tap flex w-full items-center gap-3 rounded-lg px-3 text-sm font-medium transition-colors disabled:opacity-40",
+        tone === "primary"
+          ? "text-primary hover:bg-primary/10"
+          : tone === "danger"
+            ? "text-destructive hover:bg-destructive/10"
+            : "text-foreground hover:bg-accent",
+      )}
+    >
+      <Icon className="h-4 w-4 shrink-0" />
+      {label}
+    </button>
+  );
+}
+
+export function QuotationListPage() {
+  const role = useAppSelector((s) => s.auth.user?.role);
+  const canDelete = role === "admin";
+  // Issuing locks a tax invoice for good, so it is a manager-level action —
+  // mirrors the server-side guard on POST /quotations/:id/issue.
+  const canIssue = role === "admin" || role === "manager";
+  const [docType, setDocType] = useState<DocType>("quotation");
+  const statusMutation = useSetQuotationStatus();
+  const issueMutation = useIssueQuotation();
+  const convertMutation = useConvertQuotation();
+  const [confirmIssue, setConfirmIssue] = useState<Quotation | null>(null);
+  const [wizardOpen, setWizardOpen] = useState(false);
+  // Share the document itself, not a note promising one.
+  const [share, setShare] = useState<{ doc: Quotation; channel: MessageChannel } | null>(null);
+  // ResourceListPage owns its own paging/query state, so bumping this key is
+  // how an outside creation (the wizard) forces it to reload.
+  const [listRefreshKey, setListRefreshKey] = useState(0);
+  // Mobile: the document whose overflow sheet is open, and the one being edited
+  // from it (ResourceListPage only owns the create dialog).
+  const [moreFor, setMoreFor] = useState<Quotation | null>(null);
+  const [editDoc, setEditDoc] = useState<Quotation | null>(null);
+  /*
+    Mobile delete. The action sheet is rendered outside ResourceListPage, so it
+    cannot reach that component's confirm dialog — it carries its own, driven by
+    the same mutation the desktop row uses.
+  */
+  const [confirmDelete, setConfirmDelete] = useState<Quotation | null>(null);
+  const deleteMutation = useDeleteQuotation();
+
+  async function doDelete() {
+    if (!confirmDelete) return;
+    try {
+      await deleteMutation.mutateAsync(confirmDelete.id);
+      toast.success(`${confirmDelete.docNumberFormatted} deleted`);
+      setListRefreshKey((k) => k + 1);
+    } catch (err) {
+      toast.error(getApiErrorMessage(err));
+    }
+    setConfirmDelete(null);
+  }
+
+  async function convertToInvoice(q: Quotation) {
+    try {
+      const created = await convertMutation.mutateAsync({ id: q.id, targetType: "invoice" });
+      toast.success(
+        `Tax invoice ${created.docNumberFormatted} created from ${q.docNumberFormatted}`,
+      );
+      setDocType("invoice");
+    } catch (err) {
+      toast.error(getApiErrorMessage(err));
+    }
+  }
+
+  async function issue() {
+    if (!confirmIssue) return;
+    try {
+      const issued = await issueMutation.mutateAsync(confirmIssue.id);
+      toast.success(`${issued.docNumberFormatted} issued`);
+    } catch (err) {
+      toast.error(getApiErrorMessage(err));
+    }
+    setConfirmIssue(null);
+  }
+
+  async function viewPdf(q: Quotation) {
+    try {
+      await openAuthenticatedPdf(quotationPdfPath(q.id));
+    } catch (err) {
+      toast.error(getApiErrorMessage(err));
+    }
+  }
+
+  async function downloadPdf(q: Quotation) {
+    try {
+      await downloadAuthenticatedPdf(quotationPdfPath(q.id), `${q.docNumberFormatted}.pdf`);
+    } catch (err) {
+      toast.error(getApiErrorMessage(err));
+    }
+  }
+
+  async function changeStatus(q: Quotation, status: DocStatus) {
+    try {
+      await statusMutation.mutateAsync({ id: q.id, status });
+      toast.success(`Marked ${DOC_STATUS_LABELS[status]}`);
+    } catch (err) {
+      toast.error(getApiErrorMessage(err));
+    }
+  }
+
+  return (
+    <div className="space-y-3">
+      {/*
+        Document-type tabs. A scrolling chip strip below `md`: at 390px the three
+        buttons wrapped and "Proforma Invoices" broke across two lines inside its
+        own tab, which made a row of tabs look like a paragraph.
+      */}
+      <div className="pg-chips md:mx-0 md:flex-wrap md:overflow-visible md:px-0">
+        {TABS.map((t) => (
+          <button
+            key={t.key}
+            onClick={() => setDocType(t.key)}
+            aria-pressed={docType === t.key}
+            className={`pg-chip md:rounded-lg md:px-4 ${
+              docType === t.key
+                ? "md:bg-primary md:text-primary-foreground md:shadow-sm"
+                : "md:border-border md:bg-card md:hover:bg-accent"
+            }`}
+          >
+            {t.label}
+          </button>
+        ))}
+      </div>
+
+      <ResourceListPage<Quotation, QuotationListQuery>
+        /* The catalog-driven builder, alongside the plain dialog. */
+        headerActions={
+          <button
+            onClick={() => setWizardOpen(true)}
+            data-testid="open-wizard"
+            aria-label="Build from catalog"
+            title="Build from catalog"
+            className="pg-tap flex items-center justify-center gap-1.5 rounded-lg border border-primary/40 bg-primary/10 text-sm font-medium text-primary transition-colors hover:bg-primary/20 md:min-h-0 md:min-w-0 md:px-3 md:py-1.5"
+          >
+            <Wand2 className="h-4 w-4" />
+            <span className="hidden md:inline">Build from catalog</span>
+          </button>
+        }
+        key={`${docType}-${listRefreshKey}`}
+        title={DOC_TYPE_PLURALS[docType]}
+        subtitle={
+          docType === "invoice"
+            ? "Statutory GST invoices — numbered per financial year and locked once issued"
+            : "GST-enabled documents with PDF & share"
+        }
+        newButtonText={`New ${DOC_TYPE_LABELS[docType]}`}
+        searchPlaceholder="Search by customer or number..."
+        minTableWidth="min-w-[1100px]"
+        // No detail route for a quotation, so opening the record means the
+        // editor — the same thing the row's Edit button does.
+        rowOpensEditor
+        emptyText="No documents yet. Create your first one."
+        deleteConfirmText={(q) =>
+          `Are you sure you want to delete ${q.docNumberFormatted}? This cannot be undone.`
+        }
+        columns={[
+          {
+            header: "Number",
+            getValue: (q) => (
+              <div className="flex items-center gap-1.5">
+                <span className="font-mono font-semibold text-primary">{q.docNumberFormatted}</span>
+                {q.isIssued && (
+                  <span
+                    title={`Issued ${q.issuedAt ? formatDate(q.issuedAt) : ""} — read-only`}
+                    className="inline-flex items-center gap-0.5 rounded-full bg-emerald-100 px-1.5 py-0.5 text-[10px] font-medium text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-400"
+                  >
+                    <Lock className="h-2.5 w-2.5" /> Issued
+                  </span>
+                )}
+              </div>
+            ),
+          },
+          { header: "Date", getValue: (q) => formatDate(q.date) },
+          {
+            header: "Customer",
+            getValue: (q) => <span className="font-medium">{q.customerName}</span>,
+          },
+          { header: "Items", getValue: (q) => q.items.length },
+          { header: "Taxable", getValue: (q) => formatCurrency(q.taxableValue) },
+          {
+            header: "GST",
+            getValue: (q) =>
+              q.isInterState ? `IGST ${formatCurrency(q.igst)}` : formatCurrency(q.cgst + q.sgst),
+          },
+          {
+            header: "Grand Total",
+            getValue: (q) => <span className="font-semibold">{formatCurrency(q.grandTotal)}</span>,
+          },
+          {
+            header: "Status",
+            getValue: (q) => (
+              <select
+                value={q.status}
+                aria-label={`Status of ${q.docNumberFormatted}`}
+                onChange={(e) => changeStatus(q, e.target.value as DocStatus)}
+                className={`rounded-full border-0 px-2 py-0.5 text-xs font-medium focus:ring-1 focus:ring-ring ${DOC_STATUS_COLORS[q.status]}`}
+              >
+                {DOC_STATUSES.map((s) => (
+                  <option key={s} value={s}>
+                    {DOC_STATUS_LABELS[s]}
+                  </option>
+                ))}
+              </select>
+            ),
+          },
+        ]}
+        useList={useQuotations}
+        useDelete={canDelete ? useDeleteQuotation : undefined}
+        buildQuery={({ search, page, limit }) => ({
+          search: search || undefined,
+          docType,
+          page,
+          limit,
+        })}
+        renderActions={(q, onEdit, onRequestDelete) => (
+          <div className="flex items-center gap-1">
+            <button
+              onClick={() => onEdit(q)}
+              disabled={q.isIssued}
+              data-testid={`edit-${q.id}`}
+              className="rounded-md border border-border bg-background p-1.5 hover:bg-accent transition-colors disabled:cursor-not-allowed disabled:opacity-40"
+              title={q.isIssued ? "Issued invoices cannot be edited" : "Edit"}
+            >
+              <Pencil className="h-3.5 w-3.5" />
+            </button>
+            <button
+              onClick={() => viewPdf(q)}
+              className="rounded-md border border-border bg-background p-1.5 hover:bg-accent transition-colors"
+              title="View PDF"
+            >
+              <FileText className="h-3.5 w-3.5" />
+            </button>
+            <button
+              onClick={() => downloadPdf(q)}
+              className="rounded-md border border-border bg-background p-1.5 hover:bg-accent transition-colors"
+              title="Download PDF"
+            >
+              <Download className="h-3.5 w-3.5" />
+            </button>
+            <button
+              onClick={() => setShare({ doc: q, channel: "whatsapp" })}
+              data-testid={`share-whatsapp-${q.id}`}
+              className="rounded-md border border-green-500/30 bg-green-500/10 p-1.5 text-green-600 transition-colors hover:bg-green-500/20"
+              title="Send this document on WhatsApp"
+            >
+              <MessageCircle className="h-3.5 w-3.5" />
+            </button>
+            <button
+              onClick={() => setShare({ doc: q, channel: "email" })}
+              data-testid={`share-email-${q.id}`}
+              className="rounded-md border border-border bg-background p-1.5 transition-colors hover:bg-accent"
+              title="Email this document"
+            >
+              <Mail className="h-3.5 w-3.5" />
+            </button>
+
+            {/* PI → Tax Invoice (point 10) */}
+            {q.docType === "proforma" && (
+              <button
+                onClick={() => convertToInvoice(q)}
+                disabled={convertMutation.isPending}
+                data-testid={`convert-${q.id}`}
+                className="flex items-center gap-1 rounded-md border border-primary/40 bg-primary/10 px-2 py-1.5 text-xs font-medium text-primary transition-colors hover:bg-primary/20 disabled:opacity-50"
+                title="Raise a tax invoice from this proforma"
+              >
+                <ArrowRightCircle className="h-3.5 w-3.5" /> Invoice
+              </button>
+            )}
+
+            {/* Finalise a tax invoice — irreversible, hence the confirm step. */}
+            {q.docType === "invoice" && !q.isIssued && canIssue && (
+              <button
+                onClick={() => setConfirmIssue(q)}
+                data-testid={`issue-${q.id}`}
+                className="flex items-center gap-1 rounded-md border border-emerald-500/40 bg-emerald-500/10 px-2 py-1.5 text-xs font-medium text-emerald-700 transition-colors hover:bg-emerald-500/20 dark:text-emerald-400"
+                title="Issue this invoice — it becomes read-only"
+              >
+                <Lock className="h-3.5 w-3.5" /> Issue
+              </button>
+            )}
+
+            {/*
+              Delete. Admin only, and never for an issued tax invoice — GST law
+              allows a correction only via a credit note, so the server refuses
+              it too and this button just stops the request being made.
+            */}
+            {canDelete && (
+              <button
+                onClick={() => onRequestDelete(q.id)}
+                disabled={q.isIssued}
+                data-testid={`delete-${q.id}`}
+                className="rounded-md border border-destructive/30 bg-destructive/10 p-1.5 text-destructive transition-colors hover:bg-destructive/20 disabled:cursor-not-allowed disabled:opacity-40"
+                title={
+                  q.isIssued
+                    ? "An issued invoice cannot be deleted — raise a credit note"
+                    : `Delete ${q.docNumberFormatted}`
+                }
+              >
+                <Trash2 className="h-3.5 w-3.5" />
+              </button>
+            )}
+          </div>
+        )}
+        /*
+          A document as a card.
+
+          Number and grand total are the two things anyone scans a quotation
+          list for, so they anchor the two top corners. Taxable value and the
+          GST split stay off the card — they are reconciliation figures, read on
+          a desk, and putting all four on a 390px line is how the table ended up
+          1100px wide in the first place.
+
+          Share is the one action promoted, because sending a PI to a customer on
+          WhatsApp is the reason this screen gets opened on a phone at all.
+        */
+        renderMobileCard={(q) => (
+          <RecordCard
+            onClick={() => !q.isIssued && setEditDoc(q)}
+            title={
+              <span className="flex flex-wrap items-center gap-1.5">
+                <span className="font-mono text-primary">{q.docNumberFormatted}</span>
+                {q.isIssued && (
+                  <span className="inline-flex items-center gap-0.5 rounded-full bg-emerald-100 px-1.5 py-0.5 text-[10px] font-medium text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-400">
+                    <Lock className="h-2.5 w-2.5" /> Issued
+                  </span>
+                )}
+              </span>
+            }
+            amount={formatCurrency(q.grandTotal)}
+            meta={[
+              q.customerName,
+              formatDate(q.date),
+              `${q.items.length} item${q.items.length === 1 ? "" : "s"}`,
+            ]}
+            badge={
+              <span
+                className={`inline-flex items-center whitespace-nowrap rounded-full px-2 py-0.5 text-xs font-medium ${DOC_STATUS_COLORS[q.status]}`}
+              >
+                {DOC_STATUS_LABELS[q.status]}
+              </span>
+            }
+            actions={
+              <>
+                <CardAction icon={FileText} label="PDF" onClick={() => viewPdf(q)} />
+                <CardAction
+                  icon={MessageCircle}
+                  label="Share"
+                  tone="whatsapp"
+                  data-testid={`share-whatsapp-${q.id}`}
+                  onClick={() => setShare({ doc: q, channel: "whatsapp" })}
+                />
+                <button
+                  type="button"
+                  aria-label="More actions"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    setMoreFor(q);
+                  }}
+                  className="pg-tap flex shrink-0 items-center justify-center rounded-lg border border-border text-muted-foreground transition-colors hover:bg-accent"
+                >
+                  <MoreHorizontal className="h-4 w-4" />
+                </button>
+              </>
+            }
+          />
+        )}
+        renderDialog={({ open, onOpenChange, mode, value, onSuccess }) => (
+          <QuotationDialog
+            open={open}
+            onOpenChange={onOpenChange}
+            mode={mode}
+            value={value}
+            defaultDocType={docType}
+            onSuccess={onSuccess}
+          />
+        )}
+      />
+
+      {/* The remaining document actions, on mobile. */}
+      <Sheet
+        open={Boolean(moreFor)}
+        onOpenChange={(o) => !o && setMoreFor(null)}
+        title={moreFor?.docNumberFormatted ?? "Document"}
+      >
+        {moreFor && (
+          <div className="space-y-1">
+            <DocSheetAction
+              icon={Pencil}
+              label={moreFor.isIssued ? "Edit (issued — locked)" : "Edit"}
+              disabled={moreFor.isIssued}
+              onClick={() => {
+                setEditDoc(moreFor);
+                setMoreFor(null);
+              }}
+            />
+            <DocSheetAction
+              icon={Download}
+              label="Download PDF"
+              onClick={() => {
+                void downloadPdf(moreFor);
+                setMoreFor(null);
+              }}
+            />
+            <DocSheetAction
+              icon={Mail}
+              label="Email this document"
+              onClick={() => {
+                setShare({ doc: moreFor, channel: "email" });
+                setMoreFor(null);
+              }}
+            />
+            {moreFor.docType === "proforma" && (
+              <DocSheetAction
+                icon={ArrowRightCircle}
+                label="Raise tax invoice"
+                tone="primary"
+                onClick={() => {
+                  void convertToInvoice(moreFor);
+                  setMoreFor(null);
+                }}
+              />
+            )}
+            {moreFor.docType === "invoice" && !moreFor.isIssued && canIssue && (
+              <DocSheetAction
+                icon={Lock}
+                label="Issue invoice"
+                tone="primary"
+                onClick={() => {
+                  setConfirmIssue(moreFor);
+                  setMoreFor(null);
+                }}
+              />
+            )}
+            {canDelete && !moreFor.isIssued && (
+              <DocSheetAction
+                icon={Trash2}
+                label="Delete"
+                tone="danger"
+                onClick={() => {
+                  setConfirmDelete(moreFor);
+                  setMoreFor(null);
+                }}
+              />
+            )}
+          </div>
+        )}
+      </Sheet>
+
+      {/* Edit reached from a card — ResourceListPage owns only the create dialog. */}
+      <QuotationDialog
+        open={Boolean(editDoc)}
+        onOpenChange={(o) => !o && setEditDoc(null)}
+        mode="edit"
+        value={editDoc}
+        defaultDocType={docType}
+        onSuccess={() => {
+          setEditDoc(null);
+          setListRefreshKey((k) => k + 1);
+        }}
+      />
+
+      <QuotationWizard
+        open={wizardOpen}
+        onOpenChange={setWizardOpen}
+        docType={docType}
+        onSuccess={() => setListRefreshKey((k) => k + 1)}
+      />
+
+      <SendMessageDialog
+        open={Boolean(share)}
+        onOpenChange={(open) => !open && setShare(null)}
+        channel={share?.channel ?? "whatsapp"}
+        leadId={share?.doc.leadId ?? undefined}
+        to={share?.channel === "email" ? share?.doc.customerEmail : share?.doc.customerMobile}
+        documentId={share?.doc.id}
+        documentLabel={share?.doc.docNumberFormatted}
+      />
+
+      {confirmDelete && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4 backdrop-blur-sm">
+          <div className="pg-overlay w-full max-w-md p-6" role="dialog" aria-modal="true">
+            <h3 className="text-base font-semibold text-foreground">
+              Delete {confirmDelete.docNumberFormatted}?
+            </h3>
+            <p className="mt-2 text-sm text-muted-foreground">
+              This removes the document and its PDF. It cannot be undone.
+            </p>
+            <div className="mt-5 flex justify-end gap-3">
+              <button
+                onClick={() => setConfirmDelete(null)}
+                className="rounded-lg border border-border px-4 py-2 text-sm font-medium transition-colors hover:bg-accent"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={doDelete}
+                disabled={deleteMutation.isPending}
+                data-testid="confirm-delete-doc"
+                className="rounded-lg bg-destructive px-4 py-2 text-sm font-medium text-destructive-foreground transition-colors hover:bg-destructive/90 disabled:opacity-50"
+              >
+                Delete
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {confirmIssue && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4 backdrop-blur-sm">
+          <div className="pg-overlay w-full max-w-md p-6">
+            <h3 className="text-base font-semibold text-foreground">
+              Issue {confirmIssue.docNumberFormatted}?
+            </h3>
+            <p className="mt-2 text-sm text-muted-foreground">
+              Issuing finalises this tax invoice. It cannot be edited or deleted afterwards — a
+              correction then requires a credit note. Check the customer details, line items and
+              totals first.
+            </p>
+            <div className="mt-5 flex justify-end gap-3">
+              <button
+                onClick={() => setConfirmIssue(null)}
+                className="rounded-lg border border-border px-4 py-2 text-sm font-medium transition-colors hover:bg-accent"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={issue}
+                disabled={issueMutation.isPending}
+                className="rounded-lg bg-primary px-4 py-2 text-sm font-medium text-primary-foreground transition-colors hover:bg-primary/90 disabled:opacity-50"
+              >
+                Issue Invoice
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}

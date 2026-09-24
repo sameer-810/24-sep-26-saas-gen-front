@@ -1,0 +1,101 @@
+import { http } from "@/shared/api/http";
+import { createResourceApi } from "@/modules/common/createResourceApi";
+import type { Lead, LeadListQuery, LeadCreatePayload, AssignableUser } from "../types";
+
+const api = createResourceApi<Lead, LeadListQuery, LeadCreatePayload>("/leads");
+
+export const listLeads = (query: LeadListQuery) => api.list(query);
+export const createLead = (payload: LeadCreatePayload) => api.create(payload);
+export const updateLead = (id: string, payload: Partial<LeadCreatePayload>) =>
+  api.update(id, payload);
+export const deleteLead = (id: string) => api.remove(id);
+
+/**
+ * Admin-only bulk clear-out. The server only removes dead leads (Not Interested
+ * / Irrelevant) and reports how many of the selection it skipped.
+ */
+export async function bulkDeleteLeads(ids: string[]) {
+  const res = await http.post<{ data: { deleted: number; skipped: number }; message: string }>(
+    "/leads/bulk-delete",
+    { ids },
+  );
+  return res.data.data;
+}
+
+/**
+ * Reassign the selected leads. `assignedTo: null` returns them to the
+ * pool. Admin and manager only — the server enforces this too.
+ */
+export async function bulkAssignLeads(ids: string[], assignedTo: string | null) {
+  const res = await http.post<{
+    data: { updated: number; skipped: number; assignedTo: string | null };
+    message: string;
+  }>("/leads/bulk-assign", { ids, assignedTo });
+  return res.data.data;
+}
+
+export async function addFollowUp(
+  id: string,
+  payload: { note: string; nextFollowUpDate?: string },
+) {
+  const res = await http.post<{ data: Lead }>(`/leads/${id}/follow-ups`, payload);
+  return res.data.data;
+}
+
+export async function getDueFollowUps() {
+  const res = await http.get<{ data: Lead[] }>("/leads/due-follow-ups");
+  return res.data.data;
+}
+
+export async function getAssignableUsers() {
+  const res = await http.get<{ data: AssignableUser[] }>("/auth/users/assignable");
+  return res.data.data;
+}
+
+export type ConvertLeadPayload = {
+  inventoryId: string;
+  quantity: number;
+  unitPrice: number;
+  saleDate?: string;
+  customerName?: string;
+  customerMobile?: string;
+};
+
+export async function convertLead(id: string, payload: ConvertLeadPayload) {
+  const res = await http.post<{ data: { lead: Lead; sale: unknown } }>(
+    `/leads/${id}/convert`,
+    payload,
+  );
+  return res.data.data;
+}
+
+/** Cities present on leads, most common first — feeds the Location filter. */
+export async function getLeadCityFacets(): Promise<{ city: string; count: number }[]> {
+  const res = await http.get<{ data: { city: string; count: number }[] }>("/leads/facets/cities");
+  return res.data.data;
+}
+
+/**
+ * The recycle bin. Deleted leads stay recoverable for 7 days, after
+ * which a daily sweep on the server removes them for good.
+ *
+ * Admin and manager only. Leads deleted before the retention policy existed
+ * have no `purgeAt` and are never swept — they sit here until someone acts.
+ */
+export async function listDeletedLeads(query: { search?: string; page?: number; limit?: number }) {
+  const res = await http.get<{
+    data: Lead[];
+    meta: { total: number; totalPages: number; hasNextPage: boolean; hasPrevPage: boolean };
+  }>("/leads/trash", { params: query });
+  return { items: res.data.data, meta: res.data.meta };
+}
+
+export async function restoreLead(id: string) {
+  const res = await http.post<{ data: Lead; message: string }>(`/leads/${id}/restore`);
+  return res.data.data;
+}
+
+/** Irreversible, and admin-only on the server. */
+export async function purgeLead(id: string) {
+  await http.delete(`/leads/${id}/permanent`);
+}

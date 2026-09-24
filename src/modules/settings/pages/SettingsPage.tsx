@@ -1,0 +1,562 @@
+import { useEffect, useState } from "react";
+import { Link } from "react-router-dom";
+import { useForm } from "react-hook-form";
+import { Building2, Save, ImagePlus, X } from "lucide-react";
+import { MediaPickerDialog } from "@/modules/media/components/MediaPickerDialog";
+import type { Media } from "@/modules/media/types";
+import { useBusinessProfile, useUpdateBusinessProfile } from "../hooks/useSettings";
+import { getApiErrorMessage } from "@/shared/api/http";
+import { toast } from "@/shared/lib/toast";
+import { PageLoader } from "@/shared/components/PageLoader";
+
+const inputCls =
+  "w-full rounded-lg border border-input bg-background px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-ring transition";
+
+type FormValues = {
+  businessName: string;
+  tagline: string;
+  gstin: string;
+  officeAddress: string;
+  serviceCenterAddress: string;
+  mobileNumbers: string;
+  email: string;
+  website: string;
+  jurisdiction: string;
+  defaultCgstRate: number;
+  defaultSgstRate: number;
+  defaultIgstRate: number;
+  bankName: string;
+  bankAccountNumber: string;
+  bankIfsc: string;
+  closingLines: string;
+  quotationPrefix: string;
+  nextQuotationNumber: number;
+  proformaPrefix: string;
+  nextProformaNumber: number;
+  invoicePrefix: string;
+  nextInvoiceNumber: number;
+  chatDensity: "comfortable" | "compact";
+  chatAccentOutgoing: boolean;
+  chatShowTimestamps: boolean;
+};
+
+/**
+ * A labelled form field. The `<label>` **wraps** its control rather than sitting
+ * beside it: these inputs carry no `id`, so a sibling label with no `htmlFor`
+ * associates with nothing and a screen reader reads "edit text, blank".
+ * Wrapping gives the association without threading ids through every call site.
+ */
+function Field({ label, children }: { label: string; children: React.ReactNode }) {
+  return (
+    <label className="block">
+      <span className="mb-1 block text-xs font-medium text-muted-foreground">{label}</span>
+      {children}
+    </label>
+  );
+}
+
+/**
+ * One document series: prefix, next number, and what the next document will
+ * actually be called.
+ *
+ * The preview is the point of this component. "nextQuotationNumber = 1001" is
+ * not something anyone can check at a glance; `QTN-1001` is, and it catches the
+ * two mistakes people make here — a prefix that reads wrong, and a counter set
+ * below numbers already issued.
+ */
+function SeriesRow({
+  title,
+  prefix,
+  next,
+  fy,
+  note,
+  prefixInput,
+  numberInput,
+}: {
+  title: string;
+  prefix?: string;
+  next?: number;
+  fy?: string;
+  note?: string;
+  prefixInput: React.ReactNode;
+  numberInput: React.ReactNode;
+}) {
+  const cleanPrefix = (prefix || "").trim().toUpperCase();
+  const num = Number(next);
+  // Tax invoices carry the financial year between prefix and number; the
+  // internal series do not. Mirrors nextDocNumber() on the server.
+  const preview = !cleanPrefix
+    ? "—"
+    : fy
+      ? `${cleanPrefix}/${fy}/${String(Number.isFinite(num) ? num : 1).padStart(4, "0")}`
+      : `${cleanPrefix}-${Number.isFinite(num) ? num : 1}`;
+
+  return (
+    <div className="rounded-lg border border-border p-3">
+      <div className="grid gap-3 sm:grid-cols-[1fr_7rem_9rem] sm:items-end">
+        {/* Wrapping labels — see Field above. */}
+        <label className="block">
+          <span className="mb-1 block text-xs font-medium text-muted-foreground">
+            {title} prefix
+          </span>
+          {prefixInput}
+        </label>
+        <label className="block">
+          <span className="mb-1 block text-xs font-medium text-muted-foreground">Next no.</span>
+          {numberInput}
+        </label>
+        <div className="min-w-0">
+          <span className="mb-1 block text-xs font-medium text-muted-foreground">Next will be</span>
+          <span className="block truncate font-mono text-sm font-medium tabular-nums text-foreground">
+            {preview}
+          </span>
+        </div>
+      </div>
+      {fy && (
+        <p className="mt-2 text-xs text-muted-foreground">
+          Current financial year <span className="font-mono tabular-nums">{fy}</span>
+        </p>
+      )}
+      {note && <p className="mt-1 text-xs text-muted-foreground">{note}</p>}
+    </div>
+  );
+}
+
+type ArtKey =
+  | "logoUrl"
+  | "letterheadHeaderUrl"
+  | "letterheadFooterUrl"
+  | "signatureUrl"
+  | "shareImageUrl";
+
+export function SettingsPage() {
+  const { data, isLoading } = useBusinessProfile();
+  const [art, setArt] = useState<Record<ArtKey, string>>({
+    logoUrl: "",
+    shareImageUrl: "",
+    letterheadHeaderUrl: "",
+    letterheadFooterUrl: "",
+    signatureUrl: "",
+  });
+  const [pickerFor, setPickerFor] = useState<ArtKey | null>(null);
+  const updateMutation = useUpdateBusinessProfile();
+  const form = useForm<FormValues>();
+
+  useEffect(() => {
+    if (data) {
+      form.reset({
+        businessName: data.businessName ?? "",
+        tagline: data.tagline ?? "",
+        gstin: data.gstin ?? "",
+        officeAddress: data.officeAddress ?? "",
+        serviceCenterAddress: data.serviceCenterAddress ?? "",
+        mobileNumbers: (data.mobileNumbers ?? []).join(", "),
+        email: data.email ?? "",
+        website: data.website ?? "",
+        jurisdiction: data.jurisdiction ?? "",
+        defaultCgstRate: data.defaultCgstRate ?? 9,
+        defaultSgstRate: data.defaultSgstRate ?? 9,
+        defaultIgstRate: data.defaultIgstRate ?? 18,
+        bankName: data.bankName ?? "",
+        bankAccountNumber: data.bankAccountNumber ?? "",
+        bankIfsc: data.bankIfsc ?? "",
+        closingLines: (data.closingLines ?? []).join("\n"),
+        quotationPrefix: data.quotationPrefix ?? "QTN",
+        nextQuotationNumber: data.nextQuotationNumber ?? 1001,
+        proformaPrefix: data.proformaPrefix ?? "PI",
+        nextProformaNumber: data.nextProformaNumber ?? 5001,
+        invoicePrefix: data.invoicePrefix ?? "INV",
+        nextInvoiceNumber: data.nextInvoiceNumber ?? 1,
+        chatDensity: data.chatDensity ?? "comfortable",
+        chatAccentOutgoing: data.chatAccentOutgoing ?? true,
+        chatShowTimestamps: data.chatShowTimestamps ?? true,
+      });
+      // Letterhead artwork is picked, not typed, so it lives outside the form.
+      setArt({
+        logoUrl: data.logoUrl ?? "",
+        shareImageUrl: data.shareImageUrl ?? "",
+        letterheadHeaderUrl: data.letterheadHeaderUrl ?? "",
+        letterheadFooterUrl: data.letterheadFooterUrl ?? "",
+        signatureUrl: data.signatureUrl ?? "",
+      });
+    }
+  }, [data, form]);
+
+  if (isLoading) return <PageLoader />;
+
+  async function onSubmit(values: FormValues) {
+    try {
+      await updateMutation.mutateAsync({
+        ...values,
+        defaultCgstRate: Number(values.defaultCgstRate),
+        defaultSgstRate: Number(values.defaultSgstRate),
+        defaultIgstRate: Number(values.defaultIgstRate),
+        nextQuotationNumber: Number(values.nextQuotationNumber),
+        nextProformaNumber: Number(values.nextProformaNumber),
+        nextInvoiceNumber: Number(values.nextInvoiceNumber),
+        mobileNumbers: values.mobileNumbers
+          .split(",")
+          .map((s) => s.trim())
+          .filter(Boolean),
+        closingLines: (values.closingLines || "")
+          .split("\n")
+          .map((s) => s.trim())
+          .filter(Boolean),
+        ...art,
+      });
+      toast.success("Business profile updated");
+    } catch (err) {
+      toast.error(getApiErrorMessage(err));
+    }
+  }
+
+  return (
+    <div className="erp-page max-w-4xl">
+      <div className="flex items-center gap-2">
+        <Building2 className="hidden h-5 w-5 text-primary md:block" />
+        <div className="min-w-0">
+          {/* The top bar already names the screen on mobile. */}
+          <h1 className="hidden text-xl font-bold text-foreground md:block">Settings</h1>
+          <p className="text-sm text-muted-foreground">
+            Company details used on quotations, proforma invoices, and GST breakup
+          </p>
+        </div>
+      </div>
+
+      <form onSubmit={form.handleSubmit(onSubmit)} className="space-y-6">
+        <section className="rounded-xl border border-border bg-card p-5 shadow-sm space-y-4">
+          <h2 className="text-sm font-semibold text-foreground">Company</h2>
+          <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+            <div className="sm:col-span-2">
+              <Field label="Business Name *">
+                <input className={inputCls} {...form.register("businessName")} />
+              </Field>
+            </div>
+            <div className="sm:col-span-2">
+              <Field label="Tagline">
+                <input className={inputCls} {...form.register("tagline")} />
+              </Field>
+            </div>
+            <Field label="GSTIN">
+              <input className={inputCls} {...form.register("gstin")} />
+            </Field>
+            <Field label="Jurisdiction">
+              <input className={inputCls} {...form.register("jurisdiction")} />
+            </Field>
+            <Field label="Email">
+              <input className={inputCls} {...form.register("email")} />
+            </Field>
+            <Field label="Website">
+              <input className={inputCls} {...form.register("website")} />
+            </Field>
+            <Field label="Mobile Numbers (comma separated)">
+              <input className={inputCls} {...form.register("mobileNumbers")} />
+            </Field>
+            <div className="sm:col-span-2">
+              <Field label="Office Address">
+                <textarea className={inputCls} rows={2} {...form.register("officeAddress")} />
+              </Field>
+            </div>
+            <div className="sm:col-span-2">
+              <Field label="Service Center Address">
+                <textarea
+                  className={inputCls}
+                  rows={2}
+                  {...form.register("serviceCenterAddress")}
+                />
+              </Field>
+            </div>
+          </div>
+        </section>
+
+        <section className="rounded-xl border border-border bg-card p-5 shadow-sm space-y-4">
+          <h2 className="text-sm font-semibold text-foreground">Tax Defaults (%)</h2>
+          <div className="grid grid-cols-3 gap-4">
+            <Field label="CGST">
+              <input
+                type="number"
+                step="0.01"
+                className={inputCls}
+                {...form.register("defaultCgstRate")}
+              />
+            </Field>
+            <Field label="SGST">
+              <input
+                type="number"
+                step="0.01"
+                className={inputCls}
+                {...form.register("defaultSgstRate")}
+              />
+            </Field>
+            <Field label="IGST">
+              <input
+                type="number"
+                step="0.01"
+                className={inputCls}
+                {...form.register("defaultIgstRate")}
+              />
+            </Field>
+          </div>
+        </section>
+
+        {/*
+          Document numbering — SRS 3.3.
+
+          Each series is a prefix plus the next number to be issued, shown
+          together with a live preview so the effect of an edit is visible
+          before saving rather than discovered on the next quotation.
+
+          The tax-invoice number is treated differently on purpose: it must be
+          sequential and gapless within a financial year for GSTR-1, so the
+          counter resets automatically each year and the current FY is shown
+          read-only. Editing the next number is still allowed — a business
+          migrating from another system needs to continue its existing run —
+          but it is the one field here that can create a compliance problem, so
+          it says so.
+        */}
+        <section className="pg-tile space-y-4">
+          <div>
+            <h2 className="text-sm font-semibold text-foreground">Document Numbering</h2>
+            <p className="mt-0.5 text-xs text-muted-foreground">
+              The series used for quotations, proforma invoices and tax invoices.
+            </p>
+          </div>
+
+          <div className="space-y-3">
+            <SeriesRow
+              title="Quotation"
+              prefix={form.watch("quotationPrefix")}
+              next={form.watch("nextQuotationNumber")}
+              prefixInput={
+                <input
+                  className={`${inputCls} font-mono uppercase`}
+                  maxLength={10}
+                  aria-label="Quotation prefix"
+                  {...form.register("quotationPrefix")}
+                />
+              }
+              numberInput={
+                <input
+                  type="number"
+                  min={1}
+                  className={`${inputCls} no-spinner font-mono tabular-nums`}
+                  aria-label="Next quotation number"
+                  {...form.register("nextQuotationNumber")}
+                />
+              }
+            />
+
+            <SeriesRow
+              title="Proforma Invoice"
+              prefix={form.watch("proformaPrefix")}
+              next={form.watch("nextProformaNumber")}
+              prefixInput={
+                <input
+                  className={`${inputCls} font-mono uppercase`}
+                  maxLength={10}
+                  aria-label="Proforma prefix"
+                  {...form.register("proformaPrefix")}
+                />
+              }
+              numberInput={
+                <input
+                  type="number"
+                  min={1}
+                  className={`${inputCls} no-spinner font-mono tabular-nums`}
+                  aria-label="Next proforma number"
+                  {...form.register("nextProformaNumber")}
+                />
+              }
+            />
+
+            <SeriesRow
+              title="Tax Invoice"
+              prefix={form.watch("invoicePrefix")}
+              next={form.watch("nextInvoiceNumber")}
+              fy={data?.invoiceSeriesFy}
+              note="Resets each financial year, as GST requires. Change the next number only when continuing a series from another system."
+              prefixInput={
+                <input
+                  className={`${inputCls} font-mono uppercase`}
+                  maxLength={10}
+                  aria-label="Tax invoice prefix"
+                  {...form.register("invoicePrefix")}
+                />
+              }
+              numberInput={
+                <input
+                  type="number"
+                  min={1}
+                  className={`${inputCls} no-spinner font-mono tabular-nums`}
+                  aria-label="Next tax invoice number"
+                  {...form.register("nextInvoiceNumber")}
+                />
+              }
+            />
+          </div>
+
+          <p className="text-xs text-muted-foreground">
+            Prefixes take letters, numbers, hyphen and underscore — no spaces or slashes, which
+            would clash with the separator in the invoice format.
+          </p>
+        </section>
+
+        {/*
+          Message appearance — SRS 3.4, "customizable dialogue boxes".
+
+          Three business-wide switches rather than per-user theming. The
+          requirement is one sentence with no example, and the product was
+          rejected earlier for looking inconsistent; letting each user restyle
+          their own dialogs would rebuild that. These give the client real
+          control at the level where the interface stays coherent.
+        */}
+        <section className="pg-tile space-y-4">
+          <div>
+            <h2 className="text-sm font-semibold text-foreground">Message Appearance</h2>
+            <p className="mt-0.5 text-xs text-muted-foreground">
+              How WhatsApp and email conversations are shown to your team.
+            </p>
+          </div>
+          <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
+            <Field label="Density">
+              <select className={inputCls} {...form.register("chatDensity")}>
+                <option value="comfortable">Comfortable</option>
+                <option value="compact">Compact — more messages on screen</option>
+              </select>
+            </Field>
+            <label className="flex items-center gap-2 pt-5 text-sm">
+              <input
+                type="checkbox"
+                className="h-4 w-4 rounded border-input accent-primary"
+                {...form.register("chatAccentOutgoing")}
+              />
+              Brand colour on sent messages
+            </label>
+            <label className="flex items-center gap-2 pt-5 text-sm">
+              <input
+                type="checkbox"
+                className="h-4 w-4 rounded border-input accent-primary"
+                {...form.register("chatShowTimestamps")}
+              />
+              Show timestamps
+            </label>
+          </div>
+          <p className="text-xs text-muted-foreground">
+            Pre-written replies your team can insert into a conversation are managed on the{" "}
+            {/* Link, not <a href> — a bare anchor reloads the SPA and discards
+                unsaved edits on this form. */}
+            <Link to="/templates" className="rounded text-primary hover:underline">
+              Templates
+            </Link>{" "}
+            screen.
+          </p>
+        </section>
+
+        <section className="rounded-xl border border-border bg-card p-5 shadow-sm space-y-4">
+          <h2 className="text-sm font-semibold text-foreground">Bank Details (Proforma footer)</h2>
+          <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
+            <Field label="Bank Name">
+              <input className={inputCls} {...form.register("bankName")} />
+            </Field>
+            <Field label="Account Number">
+              <input className={inputCls} {...form.register("bankAccountNumber")} />
+            </Field>
+            <Field label="IFSC">
+              <input className={inputCls} {...form.register("bankIfsc")} />
+            </Field>
+          </div>
+        </section>
+
+        {/* Point 6 — the client's own letterhead on generated PDFs. */}
+        <section className="space-y-4 rounded-xl border border-border bg-card p-5 shadow-sm">
+          <div>
+            <h2 className="text-sm font-semibold text-foreground">
+              Letterhead (PDF header & footer)
+            </h2>
+            <p className="text-xs text-muted-foreground">
+              Used on quotations, proforma invoices and tax invoices. Leave blank to keep the
+              typeset header. The <strong>WhatsApp preview picture</strong> is shown on the chat
+              card when a document link is shared and the quotation has no product photo of its own
+              — a genset photo or your logo works well.
+            </p>
+          </div>
+          <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
+            {(
+              [
+                ["logoUrl", "Company logo (sidebar)", "logo"],
+                ["letterheadHeaderUrl", "Header artwork", "header"],
+                ["letterheadFooterUrl", "Footer artwork", "footer"],
+                ["signatureUrl", "Signature / stamp", "signature"],
+                ["shareImageUrl", "WhatsApp preview picture", "share"],
+              ] as const
+            ).map(([key, label, testId]) => (
+              <Field key={key} label={label}>
+                {art[key] ? (
+                  <div className="relative inline-block">
+                    <img
+                      src={art[key]}
+                      alt={label}
+                      className="h-24 w-full rounded-lg border border-border bg-white object-contain p-1"
+                    />
+                    {/* Thumb-sized target on a phone; the icon stays small. */}
+                    <button
+                      type="button"
+                      onClick={() => setArt((a) => ({ ...a, [key]: "" }))}
+                      aria-label={`Remove ${label}`}
+                      className="absolute right-0 top-0 flex h-10 w-10 items-center justify-center rounded-bl bg-black/60 text-white transition-colors hover:bg-black/80 md:h-7 md:w-7"
+                    >
+                      <X className="h-3.5 w-3.5" />
+                    </button>
+                  </div>
+                ) : (
+                  <button
+                    type="button"
+                    onClick={() => setPickerFor(key)}
+                    data-testid={`pick-${testId}`}
+                    className="flex h-24 w-full items-center justify-center gap-1.5 rounded-lg border border-dashed border-border text-xs text-muted-foreground transition-colors hover:bg-accent"
+                  >
+                    <ImagePlus className="h-4 w-4" /> Choose image
+                  </button>
+                )}
+              </Field>
+            ))}
+          </div>
+          <Field label="Closing lines (one per line, printed above the footer artwork)">
+            <textarea
+              rows={3}
+              className={inputCls}
+              placeholder={"Thanking you,\nSales Team HOD,\nFor SAJID MANSURI"}
+              {...form.register("closingLines")}
+            />
+          </Field>
+          <p className="text-[11px] text-muted-foreground">
+            Leave the closing lines blank if the footer artwork already carries the sign-off, or it
+            prints twice.
+          </p>
+        </section>
+
+        <div className="flex justify-end">
+          <button
+            type="submit"
+            disabled={updateMutation.isPending}
+            className="flex items-center gap-2 rounded-lg bg-primary px-4 py-2 text-sm font-medium text-primary-foreground hover:bg-primary/90 disabled:opacity-50 shadow-sm transition-colors"
+          >
+            <Save className="h-4 w-4" />
+            {updateMutation.isPending ? "Saving..." : "Save Changes"}
+          </button>
+        </div>
+      </form>
+
+      <MediaPickerDialog
+        open={Boolean(pickerFor)}
+        onOpenChange={(open) => !open && setPickerFor(null)}
+        multiple={false}
+        restrictKind="image"
+        title="Choose letterhead artwork"
+        onSelect={(files: Media[]) => {
+          if (pickerFor && files[0]) setArt((a) => ({ ...a, [pickerFor]: files[0].url }));
+        }}
+      />
+    </div>
+  );
+}

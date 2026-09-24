@@ -1,0 +1,600 @@
+import { useMemo, useState } from "react";
+import { useSearchParams } from "react-router-dom";
+import { Calculator, FileText, Plus, Trash2, Zap } from "lucide-react";
+import { useCalculateCapacity, useAppliancePresets } from "../hooks/useCapacity";
+import type { ApplianceCategory, ApplianceInput, CapacityResult } from "../types";
+import { useGensetSuggestions } from "@/modules/product/hooks/useProducts";
+import { useLeadWorkspace } from "@/modules/lead/hooks/useLeadWorkspace";
+import { QuotationDialog } from "@/modules/quotation/components/QuotationDialog";
+import type { ProductOption } from "@/modules/product/types";
+import type { QuotationPrefill } from "@/modules/quotation/types";
+import { getApiErrorMessage } from "@/shared/api/http";
+import { cn, formatCurrency } from "@/lib/utils";
+import { toast } from "@/shared/lib/toast";
+import { useIsMobile } from "@/shared/hooks/useMediaQuery";
+
+const CATEGORY_LABELS: Record<ApplianceCategory, string> = {
+  lighting: "Lighting",
+  fan: "Fan",
+  ac: "Air Conditioner",
+  motor: "Motor",
+  pump: "Pump",
+  refrigeration: "Refrigeration",
+  heating: "Heating",
+  other: "Other",
+};
+const CATEGORIES = Object.keys(CATEGORY_LABELS) as ApplianceCategory[];
+
+const inputCls =
+  "w-full rounded-lg border border-input bg-background px-2.5 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-ring transition";
+
+type Row = {
+  category: ApplianceCategory;
+  name: string;
+  quantity: number;
+  watts: number;
+  /** Surge draw. Undefined means "use the category default". */
+  startingWatts?: number;
+};
+
+const STARTER_ROWS: Row[] = [
+  { category: "lighting", name: "LED lights", quantity: 10, watts: 15, startingWatts: 15 },
+  { category: "fan", name: "Ceiling fans", quantity: 5, watts: 75, startingWatts: 110 },
+  { category: "ac", name: "1.5 Ton AC", quantity: 1, watts: 3800, startingWatts: 6000 },
+];
+
+/**
+ * The line item a quotation starts from when the catalog has nothing at this
+ * rating — the sizing itself, written out so the customer can see the working.
+ */
+function describeLoad(result: CapacityResult): string {
+  // Itemised load schedule: running and starting watts
+  // per line, so the customer can audit the sizing rather than trust it.
+  const load = result.items
+    .map(
+      (it) =>
+        `${it.quantity} x ${it.name} — ${it.watts} W running` +
+        (it.startingFactor > 1 ? `, ${it.startingWatts} W starting` : ""),
+    )
+    .join("; ");
+
+  return [
+    `${result.recommendedStandardKva} kVA diesel generator set`,
+    `Sized for a running load of ${result.runningKva} kVA and a peak of ${result.peakKva} kVA ` +
+      `at ${result.inputs.powerFactor} power factor, including a ${result.inputs.safetyMarginPct}% safety margin.`,
+    `Connected load: ${load}.`,
+    result.surgeContributor ? `Largest start-up surge comes from ${result.surgeContributor}.` : "",
+  ]
+    .filter(Boolean)
+    .join("\n");
+}
+
+export function CapacityCalculatorPage() {
+  const isMobile = useIsMobile();
+  const [params] = useSearchParams();
+  // Reached from a lead's "Calculate" button — the quotation then carries the
+  // customer through, so nothing is retyped: calculate, then quote.
+  const leadId = params.get("leadId") ?? undefined;
+  const { data: workspace } = useLeadWorkspace(leadId);
+  const lead = workspace?.lead;
+
+  const [rows, setRows] = useState<Row[]>(STARTER_ROWS);
+  const [powerFactor, setPowerFactor] = useState(0.8);
+  const [safetyMargin, setSafetyMargin] = useState(25);
+  const [result, setResult] = useState<CapacityResult | null>(null);
+  const [pickedId, setPickedId] = useState<string | null>(null);
+  const [quoteOpen, setQuoteOpen] = useState(false);
+  const calc = useCalculateCapacity();
+  // The reference application chart. Picking a row fills the watts
+  // *and* the surge, which is the part people cannot look up from memory.
+  const { data: presets } = useAppliancePresets();
+
+  // Only gensets that can actually carry the calculated load, smallest first.
+  const { data: suggestions } = useGensetSuggestions(result?.recommendedStandardKva ?? null);
+  const picked: ProductOption | null = suggestions?.find((s) => s.id === pickedId) ?? null;
+
+  const quotePrefill: QuotationPrefill | null = useMemo(() => {
+    if (!result) return null;
+    const defaults = picked?.quotationDefaults;
+    return {
+      customerName: lead?.customerName ?? "",
+      customerMobile: lead?.mobile,
+      customerEmail: lead?.email,
+      customerAddress: lead?.address,
+      customerState: lead?.state,
+      description: defaults?.description || describeLoad(result),
+      kva: defaults?.kva ?? result.recommendedStandardKva,
+      quantity: 1,
+      unitPrice: defaults?.unitPrice ?? 0,
+    };
+  }, [result, picked, lead]);
+
+  function updateRow(i: number, patch: Partial<Row>) {
+    setRows((r) => r.map((row, idx) => (idx === i ? { ...row, ...patch } : row)));
+  }
+  function addRow() {
+    setRows((r) => [...r, { category: "other", name: "", quantity: 1, watts: 0 }]);
+  }
+  function removeRow(i: number) {
+    setRows((r) => r.filter((_, idx) => idx !== i));
+  }
+
+  async function onCalculate() {
+    const appliances: ApplianceInput[] = rows
+      .filter((r) => r.watts > 0 && r.quantity > 0)
+      .map((r) => ({
+        category: r.category,
+        name: r.name || CATEGORY_LABELS[r.category],
+        quantity: Number(r.quantity),
+        watts: Number(r.watts),
+        startingWatts:
+          r.startingWatts === undefined || r.startingWatts === null
+            ? undefined
+            : Number(r.startingWatts),
+      }));
+    if (appliances.length === 0) {
+      toast.error("Add at least one appliance with watts and quantity");
+      return;
+    }
+    try {
+      const res = await calc.mutateAsync({
+        appliances,
+        powerFactor: Number(powerFactor),
+        safetyMarginPct: Number(safetyMargin),
+      });
+      setResult(res);
+      // A new sizing invalidates the genset picked against the old one.
+      setPickedId(null);
+    } catch (err) {
+      toast.error(getApiErrorMessage(err));
+    }
+  }
+
+  return (
+    <div className="erp-page max-w-5xl">
+      <div className="flex items-center gap-2">
+        <Calculator className="hidden h-5 w-5 text-primary md:block" />
+        <div className="min-w-0">
+          <h1 className="hidden text-xl font-bold text-foreground md:block">
+            Generator Capacity Calculator
+          </h1>
+          <p className="text-sm text-muted-foreground">
+            Enter the connected load to get a recommended genset size (with motor start-up surge and
+            safety margin), then quote it
+          </p>
+          {lead && (
+            <p className="mt-1 text-sm font-medium text-primary" data-testid="calc-for-lead">
+              Sizing for {lead.customerName}
+            </p>
+          )}
+        </div>
+      </div>
+
+      <div className="pg-tile">
+        {/*
+          Add straight from the reference chart. One control rather than a
+          browsable table: the chart is 55 rows and nobody reads it, they look
+          up the one appliance they have. Picking a row fills the running and
+          starting watts together, which is the pair that gets guessed wrong.
+        */}
+        {presets && presets.items.length > 0 && (
+          <label className="mb-3 block">
+            <span className="mb-1 block text-xs font-medium text-muted-foreground">
+              Add from the application chart
+            </span>
+            <select
+              data-testid="preset-picker"
+              value=""
+              onChange={(e) => {
+                const preset = presets.items.find((x) => x.name === e.target.value);
+                if (!preset) return;
+                setRows((r) => [
+                  ...r,
+                  {
+                    category: preset.category,
+                    name: preset.name,
+                    quantity: 1,
+                    watts: preset.runningWatts,
+                    startingWatts: preset.startingWatts,
+                  },
+                ]);
+              }}
+              className={inputCls}
+            >
+              <option value="">Pick an appliance to add…</option>
+              {presets.groups.map((g) => (
+                <optgroup key={g} label={g}>
+                  {presets.items
+                    .filter((x) => x.group === g)
+                    .map((x) => (
+                      <option key={x.name} value={x.name}>
+                        {x.name} — {x.runningWatts} W run
+                        {x.surgeFactor > 1 ? ` / ${x.startingWatts} W start` : ""}
+                      </option>
+                    ))}
+                </optgroup>
+              ))}
+            </select>
+          </label>
+        )}
+
+        {/*
+          The load list, stacked below `md`.
+
+          This is a table of *inputs*, which is the worst kind to leave scrolling
+          sideways: you cannot fill in a field you cannot see, and the column
+          headers that say what each box means scroll away with it. One block per
+          appliance instead, with every field labelled in place.
+        */}
+        {isMobile && (
+          <div className="space-y-3">
+            {rows.map((row, i) => (
+              <div key={i} className="rounded-lg border border-border p-3">
+                <div className="mb-2 flex items-center justify-between gap-2">
+                  <span className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">
+                    Appliance <span className="font-mono tabular-nums">{i + 1}</span>
+                  </span>
+                  {/* Calm by default, destructive on contact. A red glyph on
+                      every block trains the eye to stop reading red as a
+                      warning — see DESIGN.md on row actions. */}
+                  <button
+                    onClick={() => removeRow(i)}
+                    className="pg-tap -mr-1 flex items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-destructive/10 hover:text-destructive active:text-destructive"
+                    aria-label={`Remove appliance ${i + 1}`}
+                  >
+                    <Trash2 className="h-4 w-4" />
+                  </button>
+                </div>
+                <div className="space-y-2">
+                  <label className="block">
+                    <span className="mb-1 block text-xs font-medium text-muted-foreground">
+                      Category
+                    </span>
+                    <select
+                      className={inputCls}
+                      value={row.category}
+                      onChange={(e) =>
+                        updateRow(i, { category: e.target.value as ApplianceCategory })
+                      }
+                    >
+                      {CATEGORIES.map((c) => (
+                        <option key={c} value={c}>
+                          {CATEGORY_LABELS[c]}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                  <label className="block">
+                    <span className="mb-1 block text-xs font-medium text-muted-foreground">
+                      Appliance
+                    </span>
+                    <input
+                      className={inputCls}
+                      value={row.name}
+                      placeholder="e.g. Submersible pump"
+                      onChange={(e) => updateRow(i, { name: e.target.value })}
+                    />
+                  </label>
+                  <div className="flex gap-2">
+                    <label className="block flex-1">
+                      <span className="mb-1 block text-xs font-medium text-muted-foreground">
+                        Qty
+                      </span>
+                      <input
+                        type="number"
+                        min={1}
+                        className={`${inputCls} no-spinner tabular-nums`}
+                        value={row.quantity}
+                        onChange={(e) => updateRow(i, { quantity: Number(e.target.value) })}
+                      />
+                    </label>
+                    <label className="block flex-1">
+                      <span className="mb-1 block text-xs font-medium text-muted-foreground">
+                        Running W
+                      </span>
+                      <input
+                        type="number"
+                        min={0}
+                        className={`${inputCls} no-spinner tabular-nums`}
+                        value={row.watts}
+                        onChange={(e) => updateRow(i, { watts: Number(e.target.value) })}
+                      />
+                    </label>
+                    <label className="block flex-1">
+                      <span className="mb-1 block text-xs font-medium text-muted-foreground">
+                        Starting W
+                      </span>
+                      {/* Blank = use the category default surge. */}
+                      <input
+                        type="number"
+                        min={0}
+                        placeholder="auto"
+                        className={`${inputCls} no-spinner tabular-nums`}
+                        value={row.startingWatts ?? ""}
+                        onChange={(e) =>
+                          updateRow(i, {
+                            startingWatts:
+                              e.target.value === "" ? undefined : Number(e.target.value),
+                          })
+                        }
+                      />
+                    </label>
+                  </div>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+
+        <div className={cn("overflow-auto", isMobile && "hidden")}>
+          <table className="w-full text-sm min-w-[640px]">
+            <thead className="text-left text-xs text-muted-foreground">
+              <tr>
+                <th className="px-2 py-2 font-medium">Category</th>
+                <th className="px-2 py-2 font-medium">Appliance</th>
+                <th className="px-2 py-2 font-medium w-24">Qty</th>
+                <th className="px-2 py-2 font-medium w-32">Running W (each)</th>
+                <th className="px-2 py-2 font-medium w-32">Starting W (each)</th>
+                <th className="px-2 py-2 w-10"></th>
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map((row, i) => (
+                // The column header is the visible label; there is nowhere for a
+                // per-cell one, so each control names itself and its row.
+                <tr key={i}>
+                  <td className="px-2 py-1.5">
+                    <select
+                      className={inputCls}
+                      aria-label={`Appliance ${i + 1} category`}
+                      value={row.category}
+                      onChange={(e) =>
+                        updateRow(i, { category: e.target.value as ApplianceCategory })
+                      }
+                    >
+                      {CATEGORIES.map((c) => (
+                        <option key={c} value={c}>
+                          {CATEGORY_LABELS[c]}
+                        </option>
+                      ))}
+                    </select>
+                  </td>
+                  <td className="px-2 py-1.5">
+                    <input
+                      className={inputCls}
+                      aria-label={`Appliance ${i + 1} name`}
+                      value={row.name}
+                      placeholder="e.g. Submersible pump"
+                      onChange={(e) => updateRow(i, { name: e.target.value })}
+                    />
+                  </td>
+                  <td className="px-2 py-1.5">
+                    <input
+                      type="number"
+                      min={1}
+                      className={inputCls}
+                      aria-label={`Appliance ${i + 1} quantity`}
+                      value={row.quantity}
+                      onChange={(e) => updateRow(i, { quantity: Number(e.target.value) })}
+                    />
+                  </td>
+                  <td className="px-2 py-1.5">
+                    <input
+                      type="number"
+                      min={0}
+                      className={inputCls}
+                      aria-label={`Appliance ${i + 1} running watts each`}
+                      value={row.watts}
+                      onChange={(e) => updateRow(i, { watts: Number(e.target.value) })}
+                    />
+                  </td>
+                  <td className="px-2 py-1.5">
+                    {/* Blank means "use the category default surge" — stated in
+                        the placeholder so an empty box is not read as zero. */}
+                    <input
+                      type="number"
+                      min={0}
+                      className={inputCls}
+                      aria-label={`Appliance ${i + 1} starting watts each`}
+                      placeholder="auto"
+                      value={row.startingWatts ?? ""}
+                      onChange={(e) =>
+                        updateRow(i, {
+                          startingWatts: e.target.value === "" ? undefined : Number(e.target.value),
+                        })
+                      }
+                    />
+                  </td>
+                  <td className="px-2 py-1.5">
+                    <button
+                      onClick={() => removeRow(i)}
+                      className="rounded-md p-1.5 text-destructive hover:bg-destructive/10"
+                      aria-label="Remove row"
+                    >
+                      <Trash2 className="h-4 w-4" />
+                    </button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+
+        <button
+          onClick={addRow}
+          className="pg-tap mt-3 flex w-full items-center justify-center gap-1.5 rounded-lg border border-border text-sm font-medium transition-colors hover:bg-accent md:mt-2 md:min-h-0 md:w-auto md:px-3 md:py-1.5"
+        >
+          <Plus className="h-4 w-4" /> Add appliance
+        </button>
+
+        <div className="mt-4 flex flex-wrap items-end gap-4 border-t border-border pt-4">
+          <label className="block">
+            <span className="mb-1 block text-xs font-medium text-muted-foreground">
+              Power Factor
+            </span>
+            <input
+              type="number"
+              step="0.05"
+              min={0.1}
+              max={1}
+              className={`${inputCls} w-28`}
+              value={powerFactor}
+              onChange={(e) => setPowerFactor(Number(e.target.value))}
+            />
+          </label>
+          <label className="block">
+            <span className="mb-1 block text-xs font-medium text-muted-foreground">
+              Safety Margin (%)
+            </span>
+            <input
+              type="number"
+              min={0}
+              max={100}
+              className={`${inputCls} w-28`}
+              value={safetyMargin}
+              onChange={(e) => setSafetyMargin(Number(e.target.value))}
+            />
+          </label>
+          <button
+            onClick={onCalculate}
+            disabled={calc.isPending}
+            className="flex items-center gap-2 rounded-lg bg-primary px-4 py-2 text-sm font-medium text-primary-foreground hover:bg-primary/90 disabled:opacity-50 shadow-sm transition-colors"
+          >
+            <Zap className="h-4 w-4" />
+            {calc.isPending ? "Calculating..." : "Calculate"}
+          </button>
+        </div>
+      </div>
+
+      {result && (
+        <div className="rounded-xl border border-primary/30 bg-primary/5 p-6 shadow-sm">
+          <div className="flex flex-wrap items-center justify-between gap-4">
+            <div>
+              <p className="text-sm text-muted-foreground">Recommended Generator</p>
+              <p className="text-4xl font-bold text-primary">
+                {result.recommendedStandardKva} <span className="text-2xl">kVA</span>
+              </p>
+              <p className="mt-1 text-sm text-foreground">{result.recommendation}</p>
+            </div>
+            <div className="grid grid-cols-2 gap-x-8 gap-y-2 text-sm">
+              <Stat label="Running load" value={`${result.runningKva} kVA`} />
+              <Stat label="Peak load" value={`${result.peakKva} kVA`} />
+              <Stat label="Running watts" value={`${result.runningWatts.toLocaleString()} W`} />
+              <Stat label="Peak watts" value={`${result.peakWatts.toLocaleString()} W`} />
+            </div>
+          </div>
+          {result.surgeContributor && (
+            <p className="mt-3 text-xs text-muted-foreground">
+              Largest start-up surge from: <strong>{result.surgeContributor}</strong>.
+            </p>
+          )}
+
+          {/* Calculate, then quote — the sizing carries straight into the document. */}
+          <div className="mt-5 border-t border-primary/20 pt-4" data-testid="calc-to-quote">
+            <p className="text-sm font-semibold text-foreground">Quote this sizing</p>
+            {suggestions && suggestions.length > 0 ? (
+              <>
+                <p className="mt-1 text-xs text-muted-foreground">
+                  Catalog gensets rated for {result.recommendedStandardKva} kVA or above — the
+                  description, price and GST come across with the pick.
+                </p>
+                <div className="mt-2 space-y-1.5">
+                  {suggestions.map((s) => (
+                    <label
+                      key={s.id}
+                      className={`flex cursor-pointer items-center gap-3 rounded-lg border p-2.5 text-sm transition ${
+                        pickedId === s.id
+                          ? "border-primary bg-primary/10"
+                          : "border-border bg-background hover:bg-accent"
+                      }`}
+                    >
+                      <input
+                        type="radio"
+                        name="genset"
+                        className="h-4 w-4"
+                        checked={pickedId === s.id}
+                        onChange={() => setPickedId(s.id)}
+                        data-testid={`pick-genset-${s.id}`}
+                      />
+                      {s.primaryImageUrl && (
+                        <img
+                          src={s.primaryImageUrl}
+                          alt=""
+                          className="h-9 w-9 rounded object-cover"
+                        />
+                      )}
+                      <span className="min-w-0 flex-1 truncate font-medium text-foreground">
+                        {s.name}
+                        {s.kva ? (
+                          <span className="ml-2 text-xs text-muted-foreground">{s.kva} kVA</span>
+                        ) : null}
+                      </span>
+                      <span className="shrink-0 tabular-nums text-muted-foreground">
+                        {formatCurrency(s.price)}
+                      </span>
+                    </label>
+                  ))}
+                  <label
+                    className={`flex cursor-pointer items-center gap-3 rounded-lg border p-2.5 text-sm transition ${
+                      pickedId === null
+                        ? "border-primary bg-primary/10"
+                        : "border-border bg-background hover:bg-accent"
+                    }`}
+                  >
+                    <input
+                      type="radio"
+                      name="genset"
+                      className="h-4 w-4"
+                      checked={pickedId === null}
+                      onChange={() => setPickedId(null)}
+                      data-testid="pick-genset-none"
+                    />
+                    <span className="text-foreground">
+                      None of these — quote the calculated size with the working written out
+                    </span>
+                  </label>
+                </div>
+              </>
+            ) : (
+              <p className="mt-1 text-xs text-muted-foreground">
+                No catalog genset is rated for {result.recommendedStandardKva} kVA yet, so the
+                quotation starts from the calculated size and the load breakdown. Add the model to
+                the Catalog to have its description and price come across automatically.
+              </p>
+            )}
+
+            <button
+              onClick={() => setQuoteOpen(true)}
+              data-testid="calc-create-quotation"
+              className="mt-3 flex items-center gap-2 rounded-lg bg-primary px-4 py-2 text-sm font-medium text-primary-foreground hover:bg-primary/90 shadow-sm transition-colors"
+            >
+              <FileText className="h-4 w-4" /> Create Quotation
+            </button>
+          </div>
+        </div>
+      )}
+
+      <QuotationDialog
+        open={quoteOpen}
+        onOpenChange={setQuoteOpen}
+        mode="create"
+        value={null}
+        defaultDocType="quotation"
+        prefill={quotePrefill}
+        onSuccess={() => {
+          setQuoteOpen(false);
+          toast.success("Quotation created from the calculated load");
+        }}
+      />
+    </div>
+  );
+}
+
+function Stat({ label, value }: { label: string; value: string }) {
+  return (
+    <div>
+      <div className="text-xs text-muted-foreground">{label}</div>
+      <div className="font-semibold text-foreground">{value}</div>
+    </div>
+  );
+}
