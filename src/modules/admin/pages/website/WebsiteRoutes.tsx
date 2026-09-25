@@ -24,6 +24,9 @@ const Faq = lazy(() => import("./WebsiteFaqPage").then((m) => ({ default: m.Webs
 const Media = lazy(() =>
   import("./WebsiteMediaPage").then((m) => ({ default: m.WebsiteMediaPage })),
 );
+const Legal = lazy(() =>
+  import("./WebsiteLegalPage").then((m) => ({ default: m.WebsiteLegalPage })),
+);
 const Seo = lazy(() => import("./WebsiteSeoPage").then((m) => ({ default: m.WebsiteSeoPage })));
 const Settings = lazy(() =>
   import("./WebsiteSettingsPage").then((m) => ({ default: m.WebsiteSettingsPage })),
@@ -39,6 +42,7 @@ export function WebsiteRoutes() {
       <Route path="contact" element={<Contact />} />
       <Route path="faq" element={<Faq />} />
       <Route path="media" element={<Media />} />
+      <Route path="legal" element={<Legal />} />
       <Route path="seo" element={<Seo />} />
       <Route path="settings" element={<Settings />} />
       <Route path="*" element={<Navigate to="/admin/website" replace />} />

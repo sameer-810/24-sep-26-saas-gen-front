@@ -8,6 +8,7 @@ import {
   Image,
   LayoutList,
   Pencil,
+  Scale,
   Search,
   Settings2,
   UploadCloud,
@@ -37,6 +38,7 @@ import { SECTION_KEYS, SECTION_META } from "./WebsiteUi";
 const QUICK_LINKS = [
   { to: "/admin/website/navigation", label: "Navigation", icon: LayoutList },
   { to: "/admin/website/media", label: "Media", icon: Image },
+  { to: "/admin/website/legal", label: "Legal", icon: Scale },
   { to: "/admin/website/seo", label: "SEO", icon: Search },
   { to: "/admin/website/settings", label: "Settings", icon: Settings2 },
 ];

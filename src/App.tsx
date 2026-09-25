@@ -123,6 +123,10 @@ const PublicHome = lazy(() =>
   import("./modules/public/pages/PublicHome").then((m) => ({ default: m.PublicHome })),
 );
 
+const LegalPage = lazy(() =>
+  import("./modules/public/pages/LegalPage").then((m) => ({ default: m.LegalPage })),
+);
+
 export default function App() {
   return (
     <Suspense fallback={<PageLoader />}>
@@ -155,6 +159,8 @@ export default function App() {
         </Route>
 
         <Route path="/" element={<PublicHome />} />
+        <Route path="/privacy" element={<LegalPage doc="privacy" />} />
+        <Route path="/terms" element={<LegalPage doc="terms" />} />
 
         <Route
           element={

@@ -147,6 +147,11 @@ export type WebsiteFooter = {
   copyright: string;
 };
 
+/** One legal document. `body` is the markdown subset LegalBody renders. */
+export type LegalDoc = { title: string; updatedAt: string; body: string };
+
+export type WebsiteLegal = { privacy: LegalDoc; terms: LegalDoc };
+
 export type WebsiteContent = {
   settings: WebsiteSettings;
   seo: WebsiteSeo;
@@ -163,6 +168,8 @@ export type WebsiteContent = {
   contact: WebsiteContact;
   finalCta: WebsiteCta;
   footer: WebsiteFooter;
+  /** Absent on documents saved before legal pages existed. */
+  legal?: WebsiteLegal;
 };
 
 /** Already decorated server-side. Rendered as-is; prices are never recomputed here. */

@@ -195,6 +195,7 @@ export type {
   BenefitItem,
   FaqItem,
   FeatureItem,
+  LegalDoc,
   NavItem,
   SectionEntry,
   SectionKey,
@@ -206,6 +207,7 @@ export type {
   WebsiteCta,
   WebsiteFooter,
   WebsiteHero,
+  WebsiteLegal,
   WebsitePricing,
   WebsiteSeo,
   WebsiteSettings,
@@ -236,6 +238,7 @@ export type WebsitePatch = Partial<
     | "footer"
     | "settings"
     | "seo"
+    | "legal"
   >
 >;
 
