@@ -36,7 +36,7 @@ function NavEditor({
       className="space-y-4"
       onSubmit={(e) => {
         e.preventDefault();
-        onSave(rows.map(({ _id: _ignored, ...r }) => r));
+        onSave(rows.map(({ id: _ignored, ...r }) => r));
       }}
     >
       <div className="hidden grid-cols-[1fr_1fr_auto_auto] gap-3 px-1 text-xs font-semibold uppercase tracking-[0.06em] text-muted-foreground md:grid">

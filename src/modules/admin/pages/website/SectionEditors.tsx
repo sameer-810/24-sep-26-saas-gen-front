@@ -6,8 +6,11 @@ import type {
   TrustItem,
   WebsiteContent,
   WebsiteCta,
-  WebsitePatch,
 } from "@/modules/public/types";
+// The content blocks are shared with the public site; the PATCH shape is the
+// console's own — it describes what `PUT /website` accepts, which is an admin
+// concern the public module has no reason to know about.
+import type { WebsitePatch } from "@/modules/admin/types";
 import { ListEditor, SectionForm, TextArea, TextInput, Toggle } from "./WebsiteUi";
 
 export type CopyTab =
